@@ -4,6 +4,7 @@ import contextlib
 import heapq
 import time
 import math
+import bisect
 
 from index import InvertedIndexReader, InvertedIndexWriter
 from util import IdMap, sorted_merge_posts_and_tfs
@@ -236,6 +237,151 @@ class BSBIIndex:
             # Top-K
             docs = [(score, self.doc_id_map[doc_id]) for (doc_id, score) in scores.items()]
             return sorted(docs, key = lambda x: x[0], reverse = True)[:k]
+
+    def retrieve_bm25_wand(self, query, k = 10, k1 = 1.2, b = 0.75):
+        """
+        Melakukan Ranked Retrieval dengan algoritma WAND (Weak AND) menggunakan
+        skor BM25. WAND adalah algoritma top-K yang efisien karena memangkas
+        (prune) dokumen yang tidak mungkin masuk ke top-K menggunakan upper
+        bound skor per term.
+
+        Upper bound untuk setiap term t dihitung sebagai:
+            UB[t] = IDF(t) * max_tf_t * (k1 + 1) / (max_tf_t + k1 * (1 - b))
+
+        di mana max_tf_t adalah TF maksimum term t di seluruh postings list-nya.
+        Upper bound ini valid karena tf_norm meningkat monoton terhadap TF dan
+        menurun terhadap panjang dokumen; menggunakan max_tf dan |D|→0
+        menghasilkan batas atas yang aman.
+
+        Langkah-langkah algoritma WAND:
+        1. Muat postings list untuk semua term query; hitung UB masing-masing.
+        2. Urutkan term berdasarkan docID saat ini (pointer saat ini).
+        3. Temukan "pivot": term pertama p di mana cumsum UB > threshold θ.
+           Jika tidak ada pivot, semua sisa dokumen tidak bisa masuk top-K → selesai.
+        4. Jika docID term pertama == pivot_doc: evaluasi penuh BM25(pivot_doc),
+           perbarui min-heap top-K dan θ, lalu majukan semua pointer di pivot_doc.
+        5. Jika tidak: lompati semua term sebelum pivot ke pivot_doc (skip-ahead
+           dengan binary search), lalu ulangi dari langkah 2.
+
+        catatan:
+            1. max_tf tersimpan di postings_dict[term][4] (elemen ke-5)
+            2. threshold θ = nilai minimum di min-heap top-K (0 jika heap < k)
+
+        Parameters
+        ----------
+        query: str
+            Query tokens yang dipisahkan oleh spasi
+
+        k: int
+            Jumlah top dokumen yang dikembalikan
+
+        k1: float
+            Parameter BM25 untuk mengontrol saturasi term frequency (default 1.2)
+
+        b: float
+            Parameter BM25 untuk mengontrol normalisasi panjang dokumen (default 0.75)
+
+        Result
+        ------
+        List[(float, str)]
+            List of tuple: elemen pertama adalah score BM25, dan yang
+            kedua adalah nama dokumen.
+            Daftar Top-K dokumen terurut mengecil BERDASARKAN SKOR.
+
+        JANGAN LEMPAR ERROR/EXCEPTION untuk terms yang TIDAK ADA di collection.
+        """
+        if len(self.term_id_map) == 0 or len(self.doc_id_map) == 0:
+            self.load()
+
+        query_terms = [self.term_id_map[word] for word in query.split()]
+
+        with InvertedIndexReader(self.index_name, self.postings_encoding, directory=self.output_dir) as merged_index:
+            N = len(merged_index.doc_length)
+            avgdl = sum(merged_index.doc_length.values()) / N
+
+            # Muat postings dan hitung upper bound untuk setiap term query
+            term_data = []
+            for term in query_terms:
+                if term not in merged_index.postings_dict:
+                    continue
+                df     = merged_index.postings_dict[term][1]
+                max_tf = merged_index.postings_dict[term][4]
+                idf    = math.log((N - df + 0.5) / (df + 0.5) + 1)
+                # UB dimaksimalkan pada max_tf dan |D|→0 (b*|D|/avgdl = 0)
+                ub = idf * (max_tf * (k1 + 1)) / (max_tf + k1 * (1 - b))
+                postings, tf_list = merged_index.get_postings_list(term)
+                term_data.append({
+                    'idf':      idf,
+                    'ub':       ub,
+                    'postings': postings,
+                    'tf_list':  tf_list,
+                    'ptr':      0,
+                })
+
+            if not term_data:
+                return []
+
+            # Min-heap untuk mempertahankan top-K skor tertinggi
+            heap      = []   # elemen: (score, doc_id)
+            threshold = 0.0
+
+            while True:
+                # Hapus term yang sudah habis, lalu urutkan berdasarkan docID saat ini
+                term_data = [t for t in term_data if t['ptr'] < len(t['postings'])]
+                if not term_data:
+                    break
+                term_data.sort(key=lambda t: t['postings'][t['ptr']])
+
+                # Temukan pivot: term pertama di mana cumsum UB > threshold
+                cumsum     = 0.0
+                pivot_idx  = None
+                for i, t in enumerate(term_data):
+                    cumsum += t['ub']
+                    if cumsum > threshold:
+                        pivot_idx = i
+                        break
+
+                if pivot_idx is None:
+                    break  # tidak ada dokumen yang bisa melampaui threshold
+
+                pivot_doc = term_data[pivot_idx]['postings'][term_data[pivot_idx]['ptr']]
+
+                if term_data[0]['postings'][term_data[0]['ptr']] == pivot_doc:
+                    # Semua term terdepan sudah berada di pivot_doc → evaluasi penuh
+                    score = 0.0
+                    for t in term_data:
+                        ptr = t['ptr']
+                        if ptr < len(t['postings']) and t['postings'][ptr] == pivot_doc:
+                            tf      = t['tf_list'][ptr]
+                            doc_len = merged_index.doc_length[pivot_doc]
+                            tf_norm = (tf * (k1 + 1)) / \
+                                      (tf + k1 * (1 - b + b * doc_len / avgdl))
+                            score  += t['idf'] * tf_norm
+
+                    # Perbarui min-heap top-K
+                    if len(heap) < k:
+                        heapq.heappush(heap, (score, pivot_doc))
+                        if len(heap) == k:
+                            threshold = heap[0][0]
+                    elif score > heap[0][0]:
+                        heapq.heapreplace(heap, (score, pivot_doc))
+                        threshold = heap[0][0]
+
+                    # Majukan semua pointer yang berada di pivot_doc
+                    for t in term_data:
+                        if t['ptr'] < len(t['postings']) and \
+                                t['postings'][t['ptr']] == pivot_doc:
+                            t['ptr'] += 1
+                else:
+                    # Skip-ahead: majukan term sebelum pivot ke pivot_doc
+                    for i in range(pivot_idx):
+                        t          = term_data[i]
+                        t['ptr']   = bisect.bisect_left(t['postings'],
+                                                        pivot_doc, t['ptr'])
+
+            # Kembalikan top-K terurut mengecil berdasarkan skor
+            result = [(score, self.doc_id_map[doc_id]) for (score, doc_id) in heap]
+            return sorted(result, key=lambda x: x[0], reverse=True)
 
     def retrieve_tfidf(self, query, k = 10):
         """
