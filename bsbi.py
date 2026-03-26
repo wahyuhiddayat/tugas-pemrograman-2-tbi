@@ -164,6 +164,79 @@ class BSBIIndex:
                 curr, postings, tf_list = t, postings_, tf_list_
         merged_index.append(curr, postings, tf_list)
 
+    def retrieve_bm25(self, query, k = 10, k1 = 1.2, b = 0.75):
+        """
+        Melakukan Ranked Retrieval dengan skema TaaT (Term-at-a-Time) menggunakan
+        algoritma BM25. Method akan mengembalikan top-K retrieval results.
+
+        Formula BM25 untuk sebuah term t dan dokumen D:
+
+            IDF(t)   = log( (N - df(t) + 0.5) / (df(t) + 0.5) + 1 )
+
+            TF_norm  = tf(t, D) * (k1 + 1)
+                       ------------------------------------------
+                       tf(t, D) + k1 * (1 - b + b * |D| / avgdl)
+
+            Score(t, D) = IDF(t) * TF_norm
+
+        Score akhir dokumen D terhadap query Q adalah penjumlahan Score(t, D)
+        untuk setiap term t yang ada di Q.
+
+        catatan:
+            1. informasi DF(t) ada di dictionary postings_dict pada merged index
+            2. informasi TF(t, D) ada di tf_list
+            3. informasi N dan doc_length ada di merged_index.doc_length
+            4. avgdl dihitung dari rata-rata semua nilai di doc_length
+
+        Parameters
+        ----------
+        query: str
+            Query tokens yang dipisahkan oleh spasi
+
+        k: int
+            Jumlah top dokumen yang dikembalikan
+
+        k1: float
+            Parameter BM25 untuk mengontrol saturasi term frequency (default 1.2)
+
+        b: float
+            Parameter BM25 untuk mengontrol normalisasi panjang dokumen (default 0.75)
+
+        Result
+        ------
+        List[(int, str)]
+            List of tuple: elemen pertama adalah score BM25, dan yang
+            kedua adalah nama dokumen.
+            Daftar Top-K dokumen terurut mengecil BERDASARKAN SKOR.
+
+        JANGAN LEMPAR ERROR/EXCEPTION untuk terms yang TIDAK ADA di collection.
+        """
+        if len(self.term_id_map) == 0 or len(self.doc_id_map) == 0:
+            self.load()
+
+        terms = [self.term_id_map[word] for word in query.split()]
+        with InvertedIndexReader(self.index_name, self.postings_encoding, directory=self.output_dir) as merged_index:
+            N = len(merged_index.doc_length)
+            avgdl = sum(merged_index.doc_length.values()) / N
+
+            scores = {}
+            for term in terms:
+                if term in merged_index.postings_dict:
+                    df = merged_index.postings_dict[term][1]
+                    idf = math.log((N - df + 0.5) / (df + 0.5) + 1)
+                    postings, tf_list = merged_index.get_postings_list(term)
+                    for i in range(len(postings)):
+                        doc_id, tf = postings[i], tf_list[i]
+                        doc_len = merged_index.doc_length[doc_id]
+                        tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avgdl))
+                        if doc_id not in scores:
+                            scores[doc_id] = 0
+                        scores[doc_id] += idf * tf_norm
+
+            # Top-K
+            docs = [(score, self.doc_id_map[doc_id]) for (doc_id, score) in scores.items()]
+            return sorted(docs, key = lambda x: x[0], reverse = True)[:k]
+
     def retrieve_tfidf(self, query, k = 10):
         """
         Melakukan Ranked Retrieval dengan skema TaaT (Term-at-a-Time).
