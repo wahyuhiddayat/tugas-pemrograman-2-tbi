@@ -10,6 +10,7 @@ from index import InvertedIndexReader, InvertedIndexWriter
 from util import IdMap, sorted_merge_posts_and_tfs
 from compression import StandardPostings, VBEPostings
 from tqdm import tqdm
+from preprocessing import preprocess
 
 class BSBIIndex:
     """
@@ -89,7 +90,7 @@ class BSBIIndex:
         for filename in next(os.walk(dir))[2]:
             docname = dir + "/" + filename
             with open(docname, "r", encoding = "utf8", errors = "surrogateescape") as f:
-                for token in f.read().split():
+                for token in preprocess(f.read()):
                     td_pairs.append((self.term_id_map[token], self.doc_id_map[docname]))
 
         return td_pairs
@@ -215,7 +216,7 @@ class BSBIIndex:
         if len(self.term_id_map) == 0 or len(self.doc_id_map) == 0:
             self.load()
 
-        terms = [self.term_id_map[word] for word in query.split()]
+        terms = [self.term_id_map[word] for word in preprocess(query)]
         with InvertedIndexReader(self.index_name, self.postings_encoding, directory=self.output_dir) as merged_index:
             N = len(merged_index.doc_length)
             avgdl = sum(merged_index.doc_length.values()) / N
@@ -293,7 +294,7 @@ class BSBIIndex:
         if len(self.term_id_map) == 0 or len(self.doc_id_map) == 0:
             self.load()
 
-        query_terms = [self.term_id_map[word] for word in query.split()]
+        query_terms = [self.term_id_map[word] for word in preprocess(query)]
 
         with InvertedIndexReader(self.index_name, self.postings_encoding, directory=self.output_dir) as merged_index:
             N = len(merged_index.doc_length)
@@ -422,7 +423,7 @@ class BSBIIndex:
         if len(self.term_id_map) == 0 or len(self.doc_id_map) == 0:
             self.load()
 
-        terms = [self.term_id_map[word] for word in query.split()]
+        terms = [self.term_id_map[word] for word in preprocess(query)]
         with InvertedIndexReader(self.index_name, self.postings_encoding, directory=self.output_dir) as merged_index:
 
             scores = {}
