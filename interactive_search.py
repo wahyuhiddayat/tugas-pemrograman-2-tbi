@@ -4,6 +4,7 @@ import time
 from bsbi import BSBIIndex
 from compression import VBEPostings
 from index import InvertedIndexReader
+from preprocessing import preprocess
 from trie import Trie
 from spell_correction import SpellCorrector
 from query_expansion import RocchioQueryExpansion
@@ -18,6 +19,7 @@ Perintah yang tersedia:
   :mode <nama>      Ganti mode retrieval. Pilihan: tfidf, bm25, wand, lsi, prf
   :k <angka>        Ganti jumlah hasil yang ditampilkan (default: 10)
   :ac <prefix>      Tampilkan autocomplete dari prefix (contoh: :ac dis)
+  :spell on/off     Aktifkan atau nonaktifkan koreksi ejaan otomatis
   :help             Tampilkan bantuan ini
   :quit / :q        Keluar dari program
 
@@ -29,7 +31,7 @@ Mode retrieval:
   prf    - BM25 + Pseudo-Relevance Feedback (Rocchio)
 
 Ketik query langsung untuk mencari. Koreksi ejaan otomatis diterapkan jika
-term query tidak ditemukan di index.
+term query tidak ditemukan di index (gunakan :spell off untuk menonaktifkan).
 """
 
 
@@ -51,6 +53,8 @@ class InteractiveSearch:
         Trie dictionary untuk autocomplete.
     spell_corrector : SpellCorrector
         Spell corrector berbasis edit distance.
+    spell_enabled : bool
+        Jika True, koreksi ejaan diterapkan otomatis pada setiap query.
     prf : RocchioQueryExpansion
         Query expansion dengan Rocchio PRF.
     lsi : LSIRetriever or None
@@ -78,6 +82,7 @@ class InteractiveSearch:
         self.index_dir = index_dir
         self.mode = 'bm25'
         self.top_k = 10
+        self.spell_enabled = True
 
         print("Memuat komponen search engine...")
         self._load_index()
@@ -218,9 +223,9 @@ class InteractiveSearch:
             display_path = doc_path.lstrip('.').lstrip('/').lstrip('\\')
 
             snippet = self.snippet_gen.generate(doc_path, query)
-            # Potong snippet jika terlalu panjang
+            # Potong snippet di batas kata agar tidak memotong di tengah kata
             if len(snippet) > 200:
-                snippet = snippet[:197] + "..."
+                snippet = snippet[:200].rsplit(' ', 1)[0] + " ..."
 
             print(f"  {rank:>2}. [{score:.4f}] {display_path}")
             if snippet:
@@ -239,7 +244,10 @@ class InteractiveSearch:
         if not prefix:
             print("  Penggunaan: :ac <prefix>")
             return
-        results = self.trie.autocomplete(prefix.lower(), top_k=10)
+        # Stem prefix agar sesuai dengan vocab index (yang berisi stems)
+        stemmed_tokens = preprocess(prefix)
+        lookup = stemmed_tokens[0] if stemmed_tokens else prefix.lower()
+        results = self.trie.autocomplete(lookup, top_k=10)
         if not results:
             print(f"  Tidak ada term dengan prefix '{prefix}'.")
         else:
@@ -251,6 +259,7 @@ class InteractiveSearch:
     def _apply_spell_correction(self, raw_query):
         """
         Terapkan spell correction ke query dan tampilkan jika ada perubahan.
+        Diabaikan jika self.spell_enabled = False.
 
         Parameters
         ----------
@@ -260,8 +269,11 @@ class InteractiveSearch:
         Returns
         -------
         str
-            Query setelah koreksi ejaan (dalam bentuk stems).
+            Query setelah koreksi ejaan (dalam bentuk stems), atau query
+            yang sudah di-preprocess jika spell correction dinonaktifkan.
         """
+        if not self.spell_enabled:
+            return " ".join(preprocess(raw_query))
         corrected, was_changed = self.spell_corrector.correct_query(raw_query)
         if was_changed:
             print(f"  [Spell] Koreksi: \"{raw_query}\" -> \"{corrected}\"")
@@ -278,7 +290,8 @@ class InteractiveSearch:
         print("  Interactive Search Engine")
         print("  Ketik :help untuk bantuan, :quit untuk keluar")
         print("=" * 60)
-        print(f"  Mode: {self.mode.upper()}  |  Top-K: {self.top_k}")
+        spell_status = "on" if self.spell_enabled else "off"
+        print(f"  Mode: {self.mode.upper()}  |  Top-K: {self.top_k}  |  Spell: {spell_status}")
         print()
 
         while True:
@@ -315,6 +328,17 @@ class InteractiveSearch:
                         print("  Angka tidak valid. Contoh: :k 20\n")
                 elif cmd in ('ac', 'autocomplete'):
                     self._handle_autocomplete(arg)
+                elif cmd == 'spell':
+                    if arg == 'on':
+                        self.spell_enabled = True
+                        print("  Koreksi ejaan: AKTIF\n")
+                    elif arg == 'off':
+                        self.spell_enabled = False
+                        print("  Koreksi ejaan: NONAKTIF\n")
+                    else:
+                        status = "AKTIF" if self.spell_enabled else "NONAKTIF"
+                        print(f"  Koreksi ejaan saat ini: {status}. "
+                              f"Gunakan :spell on atau :spell off\n")
                 else:
                     print(f"  Perintah tidak dikenal: ':{cmd}'. Ketik :help.\n")
             else:

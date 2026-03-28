@@ -185,7 +185,7 @@ class LSIRetriever:
             return None
 
         # q_k = Σ_k^{-1} · U_k^T · q
-        q_k = (self.U_k.T @ q_vec) / self.sigma_k # (k,)
+        q_k = (self.U_k.T @ q_vec) / (self.sigma_k + 1e-10) # (k,)
         return q_k
 
     def retrieve(self, query, top_k=10):
