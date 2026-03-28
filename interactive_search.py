@@ -9,14 +9,15 @@ from trie import Trie
 from spell_correction import SpellCorrector
 from query_expansion import RocchioQueryExpansion
 from lsi import LSIRetriever
+from adaptive_reranking import AdaptiveReranker
 from snippets import SnippetGenerator
 
 
-MODES = ['tfidf', 'bm25', 'wand', 'lsi', 'prf']
+MODES = ['tfidf', 'bm25', 'wand', 'lsi', 'prf', 'adaptive']
 
 HELP_TEXT = """
 Perintah yang tersedia:
-  :mode <nama>      Ganti mode retrieval. Pilihan: tfidf, bm25, wand, lsi, prf
+  :mode <nama>      Ganti mode retrieval. Pilihan: tfidf, bm25, wand, lsi, prf, adaptive
   :k <angka>        Ganti jumlah hasil yang ditampilkan (default: 10)
   :ac <prefix>      Tampilkan autocomplete dari prefix (contoh: :ac dis)
   :spell on/off     Aktifkan atau nonaktifkan koreksi ejaan otomatis
@@ -28,7 +29,8 @@ Mode retrieval:
   bm25   - BM25 (Okapi BM25) dengan scoring TaaT
   wand   - BM25 + WAND top-K pruning
   lsi    - Latent Semantic Indexing (SVD, k=100)
-  prf    - BM25 + Pseudo-Relevance Feedback (Rocchio)
+  prf      - BM25 + Pseudo-Relevance Feedback (Rocchio)
+  adaptive - BM25 + Corpus Graph re-ranking (Adaptive Re-ranking)
 
 Ketik query langsung untuk mencari. Koreksi ejaan otomatis diterapkan jika
 term query tidak ditemukan di index (gunakan :spell off untuk menonaktifkan).
@@ -59,6 +61,8 @@ class InteractiveSearch:
         Query expansion dengan Rocchio PRF.
     lsi : LSIRetriever or None
         LSI retriever (None jika model tidak tersedia).
+    adaptive : AdaptiveRetriever
+        Adaptive re-ranker berbasis corpus graph.
     snippet_gen : SnippetGenerator
         Generator snippet KWIC.
     mode : str
@@ -90,6 +94,7 @@ class InteractiveSearch:
         self._load_spell_corrector()
         self._load_prf()
         self._load_lsi()
+        self._load_adaptive()
         self.snippet_gen = SnippetGenerator(window_size=35)
         print("Siap.\n")
 
@@ -144,6 +149,13 @@ class InteractiveSearch:
         )
         print("  [OK] PRF (Rocchio) siap")
 
+    def _load_adaptive(self):
+        """Inisialisasi AdaptiveRetriever."""
+        self.adaptive = AdaptiveReranker(
+            self.bsbi, alpha=0.97, initial_k=100, graph_threshold=0.05
+        )
+        print("  [OK] Adaptive retriever siap (alpha=0.97, initial_k=100)")
+
     def _load_lsi(self):
         """Memuat model LSI dari disk jika tersedia."""
         lsi_path = os.path.join(self.index_dir, 'lsi_model.pkl')
@@ -189,6 +201,8 @@ class InteractiveSearch:
                 self.prf.retrieve_with_prf(query, k=k)
             info['expanded_query'] = expanded_query
             info['expansion_terms'] = expansion_terms
+        elif self.mode == 'adaptive':
+            results = self.adaptive.retrieve(query, top_k=k)
         else:
             results = self.bsbi.retrieve_bm25(query, k=k)
         return results, info
